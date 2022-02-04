@@ -10,8 +10,8 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/billykwooten/go-ecobee/ecobee"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/twistedgrim/go-ecobee/ecobee"
 )
 
 type descs string
