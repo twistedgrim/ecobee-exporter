@@ -2,11 +2,11 @@
 # Build Container Creation
 ########################
 
-FROM golang:1.16 as build
+FROM golang:1.17 as build
 
 ARG LD_FLAGS
 
-WORKDIR /go/src/github.com/billykwooten/ecobee-exporter
+WORKDIR /go/src/github.com/twistedgrim/ecobee-exporter
 COPY . .
 
 RUN go version
