@@ -21,6 +21,7 @@ import (
 
 	"github.com/billykwooten/ecobee-exporter/collector"
 	"github.com/billykwooten/go-ecobee/ecobee"
+	"github.com/twistedgrim/ecobee-exporter/collector"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/alecthomas/kingpin.v2"

@@ -1,8 +1,10 @@
-// Package prometheus provides Prometheus support for ecobee metrics.
+// Package collector provides Prometheus support for Ecobee metrics.
+// see for Ecobee API: https://www.ecobee.com/home/developer/api/introduction/index.shtml
 package collector
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -26,10 +28,10 @@ type eCollector struct {
 	fetchTime *prometheus.Desc
 
 	// runtime descriptors
-	actualTemperature, targetTemperatureMin, targetTemperatureMax *prometheus.Desc
+	actualTemperature, targetTemperatureMin, targetTemperatureMax, currentHvacMode, holdTempMetric, hvacInOperation *prometheus.Desc
 
 	// sensor descriptors
-	temperature, humidity, occupancy, inUse, currentHvacMode *prometheus.Desc
+	temperature, humidity, occupancy, inUse *prometheus.Desc
 }
 
 // NewEcobeeCollector returns a new eCollector with the given prefix assigned to all
@@ -48,52 +50,62 @@ func NewEcobeeCollector(c *ecobee.Client, metricPrefix string) *eCollector {
 		// collector metrics
 		fetchTime: d.new(
 			"fetch_time",
-			"elapsed time fetching data via Ecobee API",
+			"Elapsed time fetching data via Ecobee API",
 			nil,
 		),
 
 		// thermostat (aka runtime) metrics
 		actualTemperature: d.new(
 			"actual_temperature",
-			"thermostat-averaged current temperature",
+			"Thermostat-averaged current temperature",
 			runtime,
 		),
 		targetTemperatureMax: d.new(
 			"target_temperature_max",
-			"maximum temperature for thermostat to maintain",
+			"Maximum temperature for thermostat to maintain",
 			runtime,
 		),
 		targetTemperatureMin: d.new(
 			"target_temperature_min",
-			"minimum temperature for thermostat to maintain",
+			"Minimum temperature for thermostat to maintain",
 			runtime,
+		),
+		currentHvacMode: d.new(
+			"current_hvac_mode",
+			"Current HVAC mode of thermostat",
+			[]string{"thermostat_id", "thermostat_name", "current_hvac_mode"},
+		),
+		holdTempMetric: d.new(
+			"hold_temperature",
+			"Temperature to hold by thermostat",
+			[]string{"thermostat_id", "thermostat_name", "type"},
+		),
+		hvacInOperation: d.new(
+			"hvac_in_operation",
+			"HVAC equipment running status (0 or 1)",
+			[]string{"thermostat_id", "thermostat_name", "equipment"},
 		),
 
 		// sensor metrics
 		temperature: d.new(
 			"temperature",
-			"temperature reported by a sensor in degrees",
+			"Temperature reported by a sensor in degrees",
 			sensor,
 		),
 		humidity: d.new(
 			"humidity",
-			"humidity reported by a sensor in percent",
+			"Humidity reported by a sensor in percent",
 			sensor,
 		),
 		occupancy: d.new(
 			"occupancy",
-			"occupancy reported by a sensor (0 or 1)",
+			"Occupancy reported by a sensor (0 or 1)",
 			sensor,
 		),
 		inUse: d.new(
 			"in_use",
-			"is sensor being used in thermostat calculations (0 or 1)",
+			"Is sensor being used in thermostat calculations (0 or 1)",
 			sensor,
-		),
-		currentHvacMode: d.new(
-			"currenthvacmode",
-			"current hvac mode of thermostat",
-			[]string{"thermostat_id", "thermostat_name", "current_hvac_mode"},
 		),
 	}
 }
@@ -109,6 +121,8 @@ func (c *eCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.occupancy
 	ch <- c.inUse
 	ch <- c.currentHvacMode
+	ch <- c.holdTempMetric
+	ch <- c.hvacInOperation
 }
 
 // Collect retrieves thermostat data via the ecobee API.
@@ -119,6 +133,7 @@ func (c *eCollector) Collect(ch chan<- prometheus.Metric) {
 		IncludeSensors:  true,
 		IncludeRuntime:  true,
 		IncludeSettings: true,
+		IncludeEvents:   true,
 	})
 	elapsed := time.Now().Sub(start)
 	ch <- prometheus.MustNewConstMetric(c.fetchTime, prometheus.GaugeValue, elapsed.Seconds())
@@ -141,6 +156,22 @@ func (c *eCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(
 				c.currentHvacMode, prometheus.GaugeValue, 0, t.Identifier, t.Name, t.Settings.HvacMode,
 			)
+			if t.Settings.HvacMode != "off" {
+				for _, event := range t.Events {
+					if event.Running && event.Type == "hold" {
+						if !event.IsCoolOff && t.Settings.HvacMode != "heat" {
+							ch <- prometheus.MustNewConstMetric(
+								c.holdTempMetric, prometheus.GaugeValue, float64(event.CoolHoldTemp)/10, t.Identifier, t.Name, "cool",
+							)
+						}
+						if !event.IsHeatOff && t.Settings.HvacMode != "cool" {
+							ch <- prometheus.MustNewConstMetric(
+								c.holdTempMetric, prometheus.GaugeValue, float64(event.HeatHoldTemp)/10, t.Identifier, t.Name, "heat",
+							)
+						}
+					}
+				}
+			}
 		}
 		for _, s := range t.RemoteSensors {
 			sFields := append(tFields, s.ID, s.Name, s.Type)
@@ -184,6 +215,35 @@ func (c *eCollector) Collect(ch chan<- prometheus.Metric) {
 					}
 				default:
 					log.Infof("ignoring sensor capability %q", sc.Type)
+				}
+			}
+		}
+	}
+	statSummary, err := c.client.GetThermostatSummary(ecobee.Selection{
+		SelectionType:          "registered",
+		IncludeEquipmentStatus: true,
+		IncludeAlerts:          true,
+	})
+	if err != nil {
+		log.Error(err)
+		return
+	}
+	// sAttr := []string{"HeatPump", "HeatPump2", "HeatPump3", "CompCool1", "CompCool2", "AuxHeat1", "AuxHeat2", "AuxHeat3", "Fan", "Humidifier", "Dehumidifier", "Ventilator", "Economizer", "CompHotWater", "AuxHotWater"}
+	sAttr := []string{"CompCool1", "AuxHeat1", "Fan"}
+	for _, s := range statSummary {
+		if s.Connected {
+			r := reflect.ValueOf(s)
+			for _, a := range sAttr {
+				f := reflect.Indirect(r).FieldByName(a)
+				switch f.Bool() {
+				case true:
+					ch <- prometheus.MustNewConstMetric(
+						c.hvacInOperation, prometheus.GaugeValue, 1, s.Identifier, s.Name, a,
+					)
+				case false:
+					ch <- prometheus.MustNewConstMetric(
+						c.hvacInOperation, prometheus.GaugeValue, 0, s.Identifier, s.Name, a,
+					)
 				}
 			}
 		}
