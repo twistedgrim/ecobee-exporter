@@ -1,0 +1,14 @@
+version: "3.1"
+
+services:
+  ecobee-exporter:
+      image: ecobee-exporter
+      container_name: ecobee-exporter
+      restart: always
+      ports:
+        - "9098:9098"
+      volumes:
+        - /mnt/user/appdata/ecobee-exporter/data:/db
+      environment:
+        - ECOBEE_LISTEN_ADDRESS: 9098
+        - ECOBEE_APPKEY: p3NbLx6iSYTjXDFHIMtM77SWWPLRuEZ0
